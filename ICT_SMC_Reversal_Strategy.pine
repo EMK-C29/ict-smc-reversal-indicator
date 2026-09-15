@@ -1,0 +1,495 @@
+//@version=5
+indicator("ICT/SMC Reversal Strategy - Liquidity Sweep + CISD + IFVG", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+//════════════════════════════════════════════════════════════════════════════════
+// INPUT GROUPS
+//════════════════════════════════════════════════════════════════════════════════
+
+// ─── SWING DETECTION ───
+group_swing = "1. SWING DETECTION"
+swingLeftBars   = input.int(4, "Swing Left Bars", minval=1, maxval=10, group=group_swing)
+swingRightBars  = input.int(4, "Swing Right Bars", minval=1, maxval=10, group=group_swing)
+
+// ─── LIQUIDITY SWEEP ───
+group_sweep = "2. LIQUIDITY SWEEP"
+enableSweepVisuals = input.bool(true, "Show Sweep Markings", group=group_sweep)
+sweepFadeAfterBars = input.int(30, "Fade Sweep After N Bars", minval=5, maxval=100, group=group_sweep)
+
+// ─── CISD (Change in State of Delivery) ───
+group_cisd = "3. CISD SETTINGS"
+cisd_bodyRatio = input.float(0.55, "Min Body/Range Ratio", minval=0.3, maxval=0.9, step=0.05, group=group_cisd)
+cisd_require = input.bool(true, "Require CISD Confirmation", group=group_cisd)
+cisd_minBars = input.int(2, "Min Consecutive Bars", minval=1, maxval=5, group=group_cisd)
+
+// ─── IFVG (Inverse Fair Value Gap) ───
+group_ifvg = "4. IFVG SETTINGS"
+enableIFVG = input.bool(true, "Enable IFVG Filter", group=group_ifvg)
+ifvg_lookback = input.int(50, "IFVG Lookback Bars", minval=10, maxval=200, group=group_ifvg)
+ifvg_minGapPercent = input.float(0.001, "Min Gap %", minval=0.0001, maxval=0.01, step=0.0001, group=group_ifvg)
+
+// ─── SIGNAL CONFLUENCE ───
+group_signal = "5. SIGNAL CONFLUENCE"
+maxBarsForSequence = input.int(20, "Max Bars Between Elements", minval=5, maxval=50, group=group_signal)
+requireCISDandIFVG = input.bool(true, "Require Both CISD & IFVG", group=group_signal)
+
+// ─── HTF BIAS FILTER ───
+group_htf = "6. HTF BIAS FILTER"
+enableHTFBias = input.bool(false, "Enable HTF Bias", group=group_htf)
+htfTimeframe = input.timeframe("D", "HTF Timeframe", group=group_htf)
+htf_smaLen = input.int(50, "HTF SMA Length", minval=10, maxval=200, group=group_htf)
+
+// ─── SESSION FILTER ───
+group_session = "7. SESSION FILTER"
+enableSessionFilter = input.bool(false, "Enable Session Filter", group=group_session)
+sessionAllowLondon = input.bool(true, "Allow London (08:00-16:00 UTC)", group=group_session)
+sessionAllowNewYork = input.bool(true, "Allow New York (13:00-21:00 UTC)", group=group_session)
+
+// ─── TAKE PROFIT & RISK MANAGEMENT ───
+group_tp = "8. TAKE PROFIT LEVELS"
+tp1_rr = input.float(1.5, "TP1 Risk/Reward", minval=0.5, maxval=5.0, group=group_tp)
+tp2_rr = input.float(2.5, "TP2 Risk/Reward", minval=0.5, maxval=10.0, group=group_tp)
+tp3_rr = input.float(4.0, "TP3 Risk/Reward", minval=0.5, maxval=10.0, group=group_tp)
+showTPLines = input.bool(true, "Show TP Lines", group=group_tp)
+showSLLine = input.bool(true, "Show Stop Loss Line", group=group_tp)
+
+// ─── DISPLAY ───
+group_display = "9. DISPLAY"
+panelPosition = input.string("top-right", "Panel Position", options=["top-right", "top-left", "middle-right", "middle-left"], group=group_display)
+showPanel = input.bool(true, "Show Info Panel", group=group_display)
+showSignalArrows = input.bool(true, "Show Signal Arrows", group=group_display)
+showLabels = input.bool(true, "Show Labels", group=group_display)
+
+// ─── COLORS ───
+group_colors = "10. COLORS"
+col_bullish = input.color(color.new(color.green, 0), "Bullish Color", group=group_colors)
+col_bearish = input.color(color.new(color.red, 0), "Bearish Color", group=group_colors)
+col_ifvg_bull = input.color(color.new(color.teal, 80), "IFVG Bullish (Fill)", group=group_colors)
+col_ifvg_bear = input.color(color.new(color.red, 80), "IFVG Bearish (Fill)", group=group_colors)
+col_tp1 = input.color(color.new(color.lime, 0), "TP1 Color", group=group_colors)
+col_tp2 = input.color(color.new(color.green, 0), "TP2 Color", group=group_colors)
+col_tp3 = input.color(color.new(color.aqua, 0), "TP3 Color", group=group_colors)
+
+//════════════════════════════════════════════════════════════════════════════════
+// STATE VARIABLES (var - prevents repainting)
+//════════════════════════════════════════════════════════════════════════════════
+
+var float sweepLevel = na
+var float sweepExtreme = na
+var string sweepType = na  // "BULL" or "BEAR"
+var int sweepBar = na
+var bool sweepActive = false
+
+var float cisd_closeLevel = na
+var int cisd_bar = na
+var bool cisd_confirmed = false
+
+var array<box> ifvg_boxes = array.new<box>()
+var array<bool> ifvg_isBullish = array.new<bool>()
+var float ifvg_topLevel = na
+var float ifvg_bottomLevel = na
+var bool ifvg_active = false
+
+var string currentBias = "NONE"  // "LONG", "SHORT", "NONE"
+var bool signalFired = false
+var int signalBar = na
+var float entryPrice = na
+var float stopLevel = na
+var float tp1_level = na
+var float tp2_level = na
+var float tp3_level = na
+
+var int confluenceCount = 0
+
+//════════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+//════════════════════════════════════════════════════════════════════════════════
+
+// Check if current bar is in allowed session
+f_sessionAllowed() =>
+    if not enableSessionFilter
+        true
+    else
+        hour = hour(time("UTC"))
+        london_active = hour >= 8 and hour < 16 and sessionAllowLondon
+        newyork_active = hour >= 13 and hour < 21 and sessionAllowNewYork
+        london_active or newyork_active
+
+// Get HTF bias
+f_getHTFBias() =>
+    if not enableHTFBias
+        "NONE"
+    else
+        htf_close = close
+        htf_sma = ta.sma(htf_close, htf_smaLen)
+        if htf_close > htf_sma
+            "LONG"
+        else if htf_close < htf_sma
+            "SHORT"
+        else
+            "NONE"
+
+// Detect swing high/low
+f_detectSwingHigh() => ta.pivothigh(high, swingLeftBars, swingRightBars)
+f_detectSwingLow() => ta.pivotlow(low, swingLeftBars, swingRightBars)
+
+// Check if price swept below swing low (Bullish Sweep)
+f_bullishSweep() =>
+    swingLow = f_detectSwingLow()
+    if na(swingLow)
+        false
+    else
+        // Wick below or equal
+        lowestRecent = ta.lowest(low, swingRightBars + 2)
+        (low <= swingLow) and (close > open) and barstate.isconfirmed
+
+// Check if price swept above swing high (Bearish Sweep)
+f_bearishSweep() =>
+    swingHigh = f_detectSwingHigh()
+    if na(swingHigh)
+        false
+    else
+        highestRecent = ta.highest(high, swingRightBars + 2)
+        (high >= swingHigh) and (close < open) and barstate.isconfirmed
+
+// Body to range ratio
+f_bodyToRange(index) =>
+    body = math.abs(close[index] - open[index])
+    range = high[index] - low[index]
+    range == 0 ? 0 : body / range
+
+// Detect CISD (Bullish: close above preceding bearish candle open)
+f_bullishCISD() =>
+    if na(sweepExtreme) or sweepType != "BULL"
+        false
+    else
+        // Look for strong bullish candle above sweep extreme
+        bodyStrength = f_bodyToRange(0)
+        if bodyStrength >= cisd_bodyRatio and close > open and close > sweepExtreme
+            true
+        else
+            false
+
+// Detect CISD (Bearish: close below preceding bullish candle open)
+f_bearishCISD() =>
+    if na(sweepExtreme) or sweepType != "BEAR"
+        false
+    else
+        bodyStrength = f_bodyToRange(0)
+        if bodyStrength >= cisd_bodyRatio and close < open and close < sweepExtreme
+            true
+        else
+            false
+
+// Fair Value Gap detection (standard 3-candle FVG)
+f_detectFVG(idx) =>
+    if idx < 2
+        [na, na, na]
+    else
+        // Bullish FVG: low[idx] > high[idx-2]
+        bull_fvg_top = low[idx]
+        bull_fvg_bot = high[idx-2]
+        bull_fvg = bull_fvg_top > bull_fvg_bot ? [bull_fvg_bot, bull_fvg_top, true] : na
+        
+        // Bearish FVG: high[idx] < low[idx-2]
+        bear_fvg_top = high[idx-2]
+        bear_fvg_bot = low[idx]
+        bear_fvg = bear_fvg_top > bear_fvg_bot ? [bear_fvg_bot, bear_fvg_top, false] : na
+        
+        [bull_fvg, bear_fvg]
+
+// Check if IFVG (Inverse FVG) is present near sweep
+f_detectIFVG() =>
+    if not enableIFVG or not barstate.isconfirmed
+        false
+    else
+        found = false
+        ifvg_top = na
+        ifvg_bot = na
+        
+        // Scan for FVGs that are now inverted by recent price action
+        for i = 0 to ifvg_lookback
+            [bull_fvg, bear_fvg] = f_detectFVG(i)
+            
+            // If bullish FVG exists and price has fully closed below it (IFVG bearish)
+            if not na(bull_fvg)
+                fvg_bot = bull_fvg[0]
+                fvg_top = bull_fvg[1]
+                if close < fvg_bot and sweepType == "BEAR"
+                    ifvg_top = fvg_top
+                    ifvg_bot = fvg_bot
+                    found = true
+                    break
+            
+            // If bearish FVG exists and price has fully closed above it (IFVG bullish)
+            if not na(bear_fvg)
+                fvg_bot = bear_fvg[0]
+                fvg_top = bear_fvg[1]
+                if close > fvg_top and sweepType == "BULL"
+                    ifvg_top = fvg_top
+                    ifvg_bot = fvg_bot
+                    found = true
+                    break
+        
+        if found
+            [true, ifvg_top, ifvg_bot]
+        else
+            [false, na, na]
+
+//════════════════════════════════════════════════════════════════════════════════
+// MAIN LOGIC - EXECUTED EVERY BAR (confirmed only)
+//════════════════════════════════════════════��═══════════════════════════════════
+
+if barstate.isconfirmed
+    
+    // ─── STEP 1: DETECT LIQUIDITY SWEEP ───
+    if not sweepActive
+        if f_bullishSweep()
+            sweepType := "BULL"
+            sweepLevel := ta.pivotlow(low, swingLeftBars, swingRightBars)
+            sweepExtreme := low
+            sweepBar := bar_index
+            sweepActive := true
+            cisd_confirmed := false
+            ifvg_active := false
+            currentBias := "LONG"
+            confluenceCount := 1
+        
+        else if f_bearishSweep()
+            sweepType := "BEAR"
+            sweepLevel := ta.pivothigh(high, swingLeftBars, swingRightBars)
+            sweepExtreme := high
+            sweepBar := bar_index
+            sweepActive := true
+            cisd_confirmed := false
+            ifvg_active := false
+            currentBias := "SHORT"
+            confluenceCount := 1
+    
+    // ─── STEP 2: DETECT CISD ───
+    if sweepActive and not cisd_confirmed
+        if currentBias == "LONG" and f_bullishCISD()
+            cisd_bar := bar_index
+            cisd_closeLevel := close
+            cisd_confirmed := true
+            confluenceCount := 2
+        
+        else if currentBias == "SHORT" and f_bearishCISD()
+            cisd_bar := bar_index
+            cisd_closeLevel := close
+            cisd_confirmed := true
+            confluenceCount := 2
+        
+        // Reset if sequence breaks (timeout)
+        if bar_index - sweepBar > maxBarsForSequence
+            sweepActive := false
+            currentBias := "NONE"
+            confluenceCount := 0
+    
+    // ─── STEP 3: DETECT IFVG ───
+    if sweepActive and cisd_confirmed and not ifvg_active
+        [ifvg_found, ifvg_top, ifvg_bot] = f_detectIFVG()
+        if ifvg_found
+            ifvg_topLevel := ifvg_top
+            ifvg_bottomLevel := ifvg_bot
+            ifvg_active := true
+            confluenceCount := 3
+    
+    // ─── STEP 4: FIRE SIGNAL (all confluences met) ───
+    if sweepActive and cisd_confirmed and (not requireCISDandIFVG or ifvg_active) and not signalFired
+        if bar_index - sweepBar <= maxBarsForSequence
+            signalFired := true
+            signalBar := bar_index
+            entryPrice := close
+            
+            // Calculate Stop Loss at sweep extreme
+            stopLevel := sweepExtreme
+            
+            // Calculate TP levels based on Risk/Reward
+            risk = math.abs(entryPrice - stopLevel)
+            
+            if currentBias == "LONG"
+                tp1_level := entryPrice + (risk * tp1_rr)
+                tp2_level := entryPrice + (risk * tp2_rr)
+                tp3_level := entryPrice + (risk * tp3_rr)
+            else
+                tp1_level := entryPrice - (risk * tp1_rr)
+                tp2_level := entryPrice - (risk * tp2_rr)
+                tp3_level := entryPrice - (risk * tp3_rr)
+    
+    // ─── RESET CONDITIONS ───
+    // Cancel opposite signal
+    if currentBias == "LONG" and f_bearishSweep()
+        sweepActive := false
+        signalFired := false
+        cisd_confirmed := false
+        ifvg_active := false
+        currentBias := "NONE"
+    
+    if currentBias == "SHORT" and f_bullishSweep()
+        sweepActive := false
+        signalFired := false
+        cisd_confirmed := false
+        ifvg_active := false
+        currentBias := "NONE"
+
+//════════════════════════════════════════════════════════════════════════════════
+// VISUAL ELEMENTS - CHART MARKINGS
+//════════════════════════════════════════════════════════════════════════════════
+
+// Plot Sweep Markings (Liquidity Sweep visual)
+if enableSweepVisuals and sweepActive and bar_index - sweepBar < sweepFadeAfterBars
+    if sweepType == "BULL"
+        line.new(sweepBar, sweepExtreme, bar_index, sweepExtreme, color=col_bullish, width=2, style=line.style_dashed, xloc=xloc.bar_index)
+        if showLabels
+            label.new(sweepBar, sweepExtreme, "SWEEP", yloc=yloc.below, color=col_bullish, textcolor=color.white, size=size.small)
+    else
+        line.new(sweepBar, sweepExtreme, bar_index, sweepExtreme, color=col_bearish, width=2, style=line.style_dashed, xloc=xloc.bar_index)
+        if showLabels
+            label.new(sweepBar, sweepExtreme, "SWEEP", yloc=yloc.above, color=col_bearish, textcolor=color.white, size=size.small)
+
+// Plot CISD Marker
+if cisd_confirmed and bar_index - cisd_bar < 50 and showLabels
+    if currentBias == "LONG"
+        label.new(cisd_bar, high, "CISD", yloc=yloc.above, color=col_bullish, textcolor=color.white, size=size.small)
+    else
+        label.new(cisd_bar, low, "CISD", yloc=yloc.below, color=col_bearish, textcolor=color.white, size=size.small)
+
+// Plot IFVG Box
+if ifvg_active
+    ifvg_color = (currentBias == "LONG") ? col_ifvg_bull : col_ifvg_bear
+    ifvg_box = box.new(bar_index, ifvg_bottomLevel, bar_index + 50, ifvg_topLevel, bgcolor=ifvg_color, border_color=na, xloc=xloc.bar_index)
+    array.push(ifvg_boxes, ifvg_box)
+    
+    if showLabels
+        label.new(bar_index, (ifvg_topLevel + ifvg_bottomLevel) / 2, "IFVG", color=ifvg_color, textcolor=color.white, size=size.small)
+
+// Plot Signal Arrows
+if showSignalArrows and signalFired and bar_index == signalBar
+    if currentBias == "LONG"
+        plotshape(1, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=col_bullish, size=size.large)
+    else
+        plotshape(1, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=col_bearish, size=size.large)
+
+// Plot Stop Loss Line
+if showSLLine and signalFired and not na(stopLevel)
+    line.new(signalBar, stopLevel, bar_index, stopLevel, color=col_bearish, width=1, style=line.style_dotted, xloc=xloc.bar_index)
+    if showLabels
+        label.new(bar_index, stopLevel, "SL", color=col_bearish, textcolor=color.white, size=size.small)
+
+// Plot Take Profit Lines
+if showTPLines and signalFired
+    if not na(tp1_level)
+        line.new(signalBar, tp1_level, bar_index, tp1_level, color=col_tp1, width=1, style=line.style_solid, xloc=xloc.bar_index)
+        if showLabels
+            label.new(bar_index, tp1_level, "TP1", color=col_tp1, textcolor=color.black, size=size.small)
+    
+    if not na(tp2_level)
+        line.new(signalBar, tp2_level, bar_index, tp2_level, color=col_tp2, width=1, style=line.style_solid, xloc=xloc.bar_index)
+        if showLabels
+            label.new(bar_index, tp2_level, "TP2", color=col_tp2, textcolor=color.black, size=size.small)
+    
+    if not na(tp3_level)
+        line.new(signalBar, tp3_level, bar_index, tp3_level, color=col_tp3, width=1, style=line.style_solid, xloc=xloc.bar_index)
+        if showLabels
+            label.new(bar_index, tp3_level, "TP3", color=col_tp3, textcolor=color.black, size=size.small)
+
+//════════════════════════════════════════════════════════════════════════════════
+// INFO PANEL (Real-time Status Display)
+//════════════════════════════════════════════════════════════════════════════════
+
+if showPanel
+    // Determine panel position
+    panel_x = (panelPosition == "top-right" or panelPosition == "middle-right") ? 95 : 5
+    panel_y = (panelPosition == "top-right" or panelPosition == "top-left") ? 5 : 50
+    
+    // Build panel text
+    bias_color = currentBias == "LONG" ? color.new(col_bullish, 50) : (currentBias == "SHORT" ? color.new(col_bearish, 50) : color.new(color.gray, 50))
+    bias_text = currentBias == "LONG" ? "🟢 LONG" : (currentBias == "SHORT" ? "🔴 SHORT" : "⚪ NONE")
+    
+    sweep_text = sweepActive ? ("✅ " + sweepType) : "❌ None"
+    cisd_text = cisd_confirmed ? "✅ Confirmed" : (sweepActive ? "⏳ Waiting" : "❌ None")
+    ifvg_text = ifvg_active ? "✅ Present" : "❌ None"
+    
+    confluence_text = (confluenceCount == 3 ? "3/3 ✅ READY" : (confluenceCount == 2 ? "2/3 ⚠️" : (confluenceCount == 1 ? "1/3" : "0/3")))
+    confluence_color = confluenceCount == 3 ? color.new(color.green, 50) : (confluenceCount == 2 ? color.new(color.orange, 50) : color.new(color.red, 50))
+    
+    trade_status = signalFired ? "🎯 Signal Active" : (sweepActive and cisd_confirmed ? "📊 Setup Forming" : (sweepActive ? "🔎 Searching" : "⏸️ Idle"))
+    
+    entry_text = not na(entryPrice) ? str.tostring(entryPrice, format.price) : "—"
+    stop_text = not na(stopLevel) ? str.tostring(stopLevel, format.price) : "—"
+    tp1_text = not na(tp1_level) ? str.tostring(tp1_level, format.price) : "—"
+    tp2_text = not na(tp2_level) ? str.tostring(tp2_level, format.price) : "—"
+    tp3_text = not na(tp3_level) ? str.tostring(tp3_level, format.price) : "—"
+    
+    rr_current = (not na(entryPrice) and not na(stopLevel)) ? ((close - entryPrice) / math.abs(entryPrice - stopLevel)) : na
+    rr_text = not na(rr_current) ? str.tostring(rr_current, format.price) + "R" : "—"
+    
+    session_text = enableSessionFilter ? (f_sessionAllowed() ? "✅ Active" : "❌ Inactive") : "Disabled"
+    htf_text = enableHTFBias ? f_getHTFBias() : "Disabled"
+    
+    // Create table
+    table_data = table.new(position.new(
+        (panelPosition == "top-right" or panelPosition == "middle-right") ? position.top_right : position.top_left,
+        0, 0), 2, 16,
+        bgcolor=color.new(color.rgb(20, 20, 20), 20),
+        border_color=color.new(color.white, 60),
+        border_width=1)
+    
+    // Headers & rows
+    table.cell(table_data, 0, 0, "ICT/SMC INDICATOR", bgcolor=color.new(color.blue, 70), text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 0, "", bgcolor=color.new(color.blue, 70), text_size=size.small)
+    
+    table.cell(table_data, 0, 1, "Current Bias:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 1, bias_text, bgcolor=bias_color, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 2, "Sweep:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 2, sweep_text, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 3, "CISD:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 3, cisd_text, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 4, "IFVG:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 4, ifvg_text, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 5, "Confluence:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 5, confluence_text, bgcolor=confluence_color, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 6, "Trade Status:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 6, trade_status, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 7, "Entry:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 7, entry_text, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 8, "Stop Level:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 8, stop_text, text_size=size.small, text_color=col_bearish)
+    
+    table.cell(table_data, 0, 9, "TP1:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 9, tp1_text, text_size=size.small, text_color=col_tp1)
+    
+    table.cell(table_data, 0, 10, "TP2:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 10, tp2_text, text_size=size.small, text_color=col_tp2)
+    
+    table.cell(table_data, 0, 11, "TP3:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 11, tp3_text, text_size=size.small, text_color=col_tp3)
+    
+    table.cell(table_data, 0, 12, "Current R/R:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 12, rr_text, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 13, "Session:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 13, session_text, text_size=size.small, text_color=color.white)
+    
+    table.cell(table_data, 0, 14, "HTF Bias:", text_size=size.small, text_color=color.white)
+    table.cell(table_data, 1, 14, htf_text, text_size=size.small, text_color=color.white)
+
+//════════════════════════════════════════════════════════════════════════════════
+// ALERTS
+//════════════════════════════════════════════════════════════════════════════════
+
+if signalFired and bar_index == signalBar
+    if currentBias == "LONG"
+        alert("🟢 LONG SIGNAL FIRED - Entry: " + str.tostring(entryPrice, format.price) + " | SL: " + str.tostring(stopLevel, format.price), alert.freq_once_per_bar)
+    else
+        alert("🔴 SHORT SIGNAL FIRED - Entry: " + str.tostring(entryPrice, format.price) + " | SL: " + str.tostring(stopLevel, format.price), alert.freq_once_per_bar)
+
+// Plot placeholder for debugging
+plot(na, title="Version 5.0 - Non-Repainting")
