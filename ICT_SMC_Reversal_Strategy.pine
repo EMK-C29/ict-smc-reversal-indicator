@@ -1,5 +1,5 @@
-//@version=5
-indicator("ICT/SMC Reversal Strategy - Liquidity Sweep + CISD + IFVG", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+//@version=6
+indicator("ICT/SMC Reversal Strategy - Liquidity Sweep + CISD + IFVG [v6]", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
 
 //════════════════════════════════════════════════════════════════════════════════
 // INPUT GROUPS
@@ -99,6 +99,8 @@ var float tp2_level = na
 var float tp3_level = na
 
 var int confluenceCount = 0
+var line sweepLine = na
+var label sweepLabel = na
 
 //════════════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
@@ -119,8 +121,8 @@ f_getHTFBias() =>
     if not enableHTFBias
         "NONE"
     else
-        htf_close = close
-        htf_sma = ta.sma(htf_close, htf_smaLen)
+        htf_close = request.security(syminfo.tickerid, htfTimeframe, close)
+        htf_sma = request.security(syminfo.tickerid, htfTimeframe, ta.sma(close, htf_smaLen))
         if htf_close > htf_sma
             "LONG"
         else if htf_close < htf_sma
@@ -138,7 +140,6 @@ f_bullishSweep() =>
     if na(swingLow)
         false
     else
-        // Wick below or equal
         lowestRecent = ta.lowest(low, swingRightBars + 2)
         (low <= swingLow) and (close > open) and barstate.isconfirmed
 
@@ -162,7 +163,6 @@ f_bullishCISD() =>
     if na(sweepExtreme) or sweepType != "BULL"
         false
     else
-        // Look for strong bullish candle above sweep extreme
         bodyStrength = f_bodyToRange(0)
         if bodyStrength >= cisd_bodyRatio and close > open and close > sweepExtreme
             true
@@ -237,7 +237,7 @@ f_detectIFVG() =>
 
 //════════════════════════════════════════════════════════════════════════════════
 // MAIN LOGIC - EXECUTED EVERY BAR (confirmed only)
-//════════════════════════════════════════════��═══════════════════════════════════
+//════════════════════════════════════════════════════════════════════════════════
 
 if barstate.isconfirmed
     
@@ -339,13 +339,28 @@ if barstate.isconfirmed
 // Plot Sweep Markings (Liquidity Sweep visual)
 if enableSweepVisuals and sweepActive and bar_index - sweepBar < sweepFadeAfterBars
     if sweepType == "BULL"
-        line.new(sweepBar, sweepExtreme, bar_index, sweepExtreme, color=col_bullish, width=2, style=line.style_dashed, xloc=xloc.bar_index)
-        if showLabels
-            label.new(sweepBar, sweepExtreme, "SWEEP", yloc=yloc.below, color=col_bullish, textcolor=color.white, size=size.small)
+        if na(sweepLine)
+            sweepLine := line.new(sweepBar, sweepExtreme, bar_index, sweepExtreme, color=col_bullish, width=2, style=line.style_dashed, xloc=xloc.bar_index)
+        else
+            line.set_xy2(sweepLine, bar_index, sweepExtreme)
+        
+        if showLabels and na(sweepLabel)
+            sweepLabel := label.new(sweepBar, sweepExtreme, "SWEEP", yloc=yloc.below, color=col_bullish, textcolor=color.white, size=size.small)
     else
-        line.new(sweepBar, sweepExtreme, bar_index, sweepExtreme, color=col_bearish, width=2, style=line.style_dashed, xloc=xloc.bar_index)
-        if showLabels
-            label.new(sweepBar, sweepExtreme, "SWEEP", yloc=yloc.above, color=col_bearish, textcolor=color.white, size=size.small)
+        if na(sweepLine)
+            sweepLine := line.new(sweepBar, sweepExtreme, bar_index, sweepExtreme, color=col_bearish, width=2, style=line.style_dashed, xloc=xloc.bar_index)
+        else
+            line.set_xy2(sweepLine, bar_index, sweepExtreme)
+        
+        if showLabels and na(sweepLabel)
+            sweepLabel := label.new(sweepBar, sweepExtreme, "SWEEP", yloc=yloc.above, color=col_bearish, textcolor=color.white, size=size.small)
+else if not enableSweepVisuals or bar_index - sweepBar >= sweepFadeAfterBars
+    if not na(sweepLine)
+        line.delete(sweepLine)
+        sweepLine := na
+    if not na(sweepLabel)
+        label.delete(sweepLabel)
+        sweepLabel := na
 
 // Plot CISD Marker
 if cisd_confirmed and bar_index - cisd_bar < 50 and showLabels
@@ -399,10 +414,14 @@ if showTPLines and signalFired
 
 if showPanel
     // Determine panel position
-    panel_x = (panelPosition == "top-right" or panelPosition == "middle-right") ? 95 : 5
-    panel_y = (panelPosition == "top-right" or panelPosition == "top-left") ? 5 : 50
+    panel_pos = switch panelPosition
+        "top-right" => position.top_right
+        "top-left" => position.top_left
+        "middle-right" => position.middle_right
+        "middle-left" => position.middle_left
+        => position.top_right
     
-    // Build panel text
+    // Build panel text with v6 enhancements
     bias_color = currentBias == "LONG" ? color.new(col_bullish, 50) : (currentBias == "SHORT" ? color.new(col_bearish, 50) : color.new(color.gray, 50))
     bias_text = currentBias == "LONG" ? "🟢 LONG" : (currentBias == "SHORT" ? "🔴 SHORT" : "⚪ NONE")
     
@@ -427,16 +446,14 @@ if showPanel
     session_text = enableSessionFilter ? (f_sessionAllowed() ? "✅ Active" : "❌ Inactive") : "Disabled"
     htf_text = enableHTFBias ? f_getHTFBias() : "Disabled"
     
-    // Create table
-    table_data = table.new(position.new(
-        (panelPosition == "top-right" or panelPosition == "middle-right") ? position.top_right : position.top_left,
-        0, 0), 2, 16,
+    // Create table with v6 syntax (position.new replaced with position enum)
+    table_data = table.new(panel_pos, 2, 16,
         bgcolor=color.new(color.rgb(20, 20, 20), 20),
         border_color=color.new(color.white, 60),
         border_width=1)
     
     // Headers & rows
-    table.cell(table_data, 0, 0, "ICT/SMC INDICATOR", bgcolor=color.new(color.blue, 70), text_size=size.small, text_color=color.white)
+    table.cell(table_data, 0, 0, "ICT/SMC INDICATOR v6", bgcolor=color.new(color.blue, 70), text_size=size.small, text_color=color.white)
     table.cell(table_data, 1, 0, "", bgcolor=color.new(color.blue, 70), text_size=size.small)
     
     table.cell(table_data, 0, 1, "Current Bias:", text_size=size.small, text_color=color.white)
@@ -492,4 +509,4 @@ if signalFired and bar_index == signalBar
         alert("🔴 SHORT SIGNAL FIRED - Entry: " + str.tostring(entryPrice, format.price) + " | SL: " + str.tostring(stopLevel, format.price), alert.freq_once_per_bar)
 
 // Plot placeholder for debugging
-plot(na, title="Version 5.0 - Non-Repainting")
+plot(na, title="Version 6.0 - Non-Repainting")
