@@ -111,12 +111,12 @@ f_sessionAllowed() =>
     if not enableSessionFilter
         true
     else
-        hour = hour(time("UTC"))
-        london_active = hour >= 8 and hour < 16 and sessionAllowLondon
-        newyork_active = hour >= 13 and hour < 21 and sessionAllowNewYork
+        curr_hour = hour(time("UTC"))
+        london_active = curr_hour >= 8 and curr_hour < 16 and sessionAllowLondon
+        newyork_active = curr_hour >= 13 and curr_hour < 21 and sessionAllowNewYork
         london_active or newyork_active
 
-// Get HTF bias
+// Get HTF bias using request.security
 f_getHTFBias() =>
     if not enableHTFBias
         "NONE"
@@ -140,7 +140,6 @@ f_bullishSweep() =>
     if na(swingLow)
         false
     else
-        lowestRecent = ta.lowest(low, swingRightBars + 2)
         (low <= swingLow) and (close > open) and barstate.isconfirmed
 
 // Check if price swept above swing high (Bearish Sweep)
@@ -149,13 +148,12 @@ f_bearishSweep() =>
     if na(swingHigh)
         false
     else
-        highestRecent = ta.highest(high, swingRightBars + 2)
         (high >= swingHigh) and (close < open) and barstate.isconfirmed
 
 // Body to range ratio
-f_bodyToRange(index) =>
-    body = math.abs(close[index] - open[index])
-    range = high[index] - low[index]
+f_bodyToRange(idx) =>
+    body = math.abs(close[idx] - open[idx])
+    range = high[idx] - low[idx]
     range == 0 ? 0 : body / range
 
 // Detect CISD (Bullish: close above preceding bearish candle open)
@@ -207,7 +205,7 @@ f_detectIFVG() =>
         ifvg_bot = na
         
         // Scan for FVGs that are now inverted by recent price action
-        for i = 0 to ifvg_lookback
+        for i = 0 to math.min(ifvg_lookback, 100)
             [bull_fvg, bear_fvg] = f_detectFVG(i)
             
             // If bullish FVG exists and price has fully closed below it (IFVG bearish)
@@ -245,7 +243,7 @@ if barstate.isconfirmed
     if not sweepActive
         if f_bullishSweep()
             sweepType := "BULL"
-            sweepLevel := ta.pivotlow(low, swingLeftBars, swingRightBars)
+            sweepLevel := f_detectSwingLow()
             sweepExtreme := low
             sweepBar := bar_index
             sweepActive := true
@@ -256,7 +254,7 @@ if barstate.isconfirmed
         
         else if f_bearishSweep()
             sweepType := "BEAR"
-            sweepLevel := ta.pivothigh(high, swingLeftBars, swingRightBars)
+            sweepLevel := f_detectSwingHigh()
             sweepExtreme := high
             sweepBar := bar_index
             sweepActive := true
@@ -413,7 +411,7 @@ if showTPLines and signalFired
 //════════════════════════════════════════════════════════════════════════════════
 
 if showPanel
-    // Determine panel position
+    // Determine panel position using switch
     panel_pos = switch panelPosition
         "top-right" => position.top_right
         "top-left" => position.top_left
@@ -446,7 +444,7 @@ if showPanel
     session_text = enableSessionFilter ? (f_sessionAllowed() ? "✅ Active" : "❌ Inactive") : "Disabled"
     htf_text = enableHTFBias ? f_getHTFBias() : "Disabled"
     
-    // Create table with v6 syntax (position.new replaced with position enum)
+    // Create table with v6 syntax
     table_data = table.new(panel_pos, 2, 16,
         bgcolor=color.new(color.rgb(20, 20, 20), 20),
         border_color=color.new(color.white, 60),
@@ -509,4 +507,4 @@ if signalFired and bar_index == signalBar
         alert("🔴 SHORT SIGNAL FIRED - Entry: " + str.tostring(entryPrice, format.price) + " | SL: " + str.tostring(stopLevel, format.price), alert.freq_once_per_bar)
 
 // Plot placeholder for debugging
-plot(na, title="Version 6.0 - Non-Repainting")
+plot(na, title="Version 6.0 - Non-Repainting - FIXED ✅")
