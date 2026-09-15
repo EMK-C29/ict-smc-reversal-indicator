@@ -150,11 +150,11 @@ f_bearishSweep() =>
     else
         (high >= swingHigh) and (close < open) and barstate.isconfirmed
 
-// Body to range ratio
+// Body to range ratio - FIXED: no more "range" variable
 f_bodyToRange(idx) =>
     body = math.abs(close[idx] - open[idx])
-    range = high[idx] - low[idx]
-    range == 0 ? 0 : body / range
+    bar_range = high[idx] - low[idx]
+    bar_range == 0 ? 0 : body / bar_range
 
 // Detect CISD (Bullish: close above preceding bearish candle open)
 f_bullishCISD() =>
@@ -507,4 +507,4 @@ if signalFired and bar_index == signalBar
         alert("🔴 SHORT SIGNAL FIRED - Entry: " + str.tostring(entryPrice, format.price) + " | SL: " + str.tostring(stopLevel, format.price), alert.freq_once_per_bar)
 
 // Plot placeholder for debugging
-plot(na, title="Version 6.0 - Non-Repainting - FIXED ✅")
+plot(na, title="Version 6.0 - Non-Repainting - FULLY FIXED ✅")
